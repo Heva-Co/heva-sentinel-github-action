@@ -303,6 +303,47 @@ def build_detail_thread(findings: dict, known_issues: list) -> str:
     return "\n".join(lines)
 
 
+def auto_persist_critical_issues(findings: dict, known_issues: list) -> bool:
+    """Auto-add new CRITICAL findings to known_issues.json so they persist until fixed or suppressed."""
+    if findings.get("verdict") != "CRITICAL":
+        return False
+    critical_points = findings.get("critical_points", [])
+    if not critical_points:
+        return False
+
+    issues_path = Path(".github/sentinel/known_issues.json")
+    existing_titles = {i["title"].lower() for i in known_issues}
+
+    # Determine next auto ID
+    repo_prefix = REPO_SHORT.replace("heva-", "").replace("-backend", "").replace("-frontend", "").upper()[:3]
+    existing_ids = [i["id"] for i in known_issues if i["id"].startswith(f"{repo_prefix}-AUTO-")]
+    next_num = len(existing_ids) + 1
+
+    new_entries = []
+    for point in critical_points:
+        if point.lower() not in existing_titles:
+            new_entries.append({
+                "id": f"{repo_prefix}-AUTO-{next_num:03d}",
+                "severity": "CRITICAL",
+                "category": "security",
+                "title": point,
+                "file_hint": "",
+                "auto_added": True,
+                "commit": COMMIT_SHA
+            })
+            next_num += 1
+
+    if not new_entries:
+        return False
+
+    updated = known_issues + new_entries
+    issues_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(issues_path, "w") as f:
+        json.dump(updated, f, indent=2)
+    print(f"Auto-persisted {len(new_entries)} CRITICAL finding(s) to known_issues.json")
+    return True
+
+
 def remove_fixed_issues(fixed_ids: list, known_issues: list) -> bool:
     """Remove fixed issues from known_issues.json. Returns True if file was updated."""
     if not fixed_ids:
@@ -325,7 +366,7 @@ def commit_and_push_known_issues():
         subprocess.run(["git", "config", "user.name", "Heva Code Sentinel"], check=True)
         subprocess.run(["git", "add", ".github/sentinel/known_issues.json"], check=True)
         subprocess.run(
-            ["git", "commit", "-m", "chore: sentinel removed fixed known issues"],
+            ["git", "commit", "-m", "chore: sentinel updated known_issues.json"],
             check=True
         )
         subprocess.run(["git", "push"], check=True)
@@ -389,7 +430,11 @@ def main():
     detail_text = build_detail_thread(findings, known_issues)
     post_to_google_chat({"text": detail_text}, thread_key=THREAD_KEY, reply=True)
 
-    if remove_fixed_issues(fixed_ids, known_issues):
+    persisted = auto_persist_critical_issues(findings, known_issues)
+    # Reload after potential auto-persist before removing fixed
+    known_issues = load_known_issues()
+    fixed = remove_fixed_issues(fixed_ids, known_issues)
+    if persisted or fixed:
         commit_and_push_known_issues()
 
 
