@@ -669,14 +669,22 @@ If no confident matches for an issue, omit it entirely. Return valid JSON only, 
     try:
         message = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=512,
+            max_tokens=1024,
+            system="You are a JSON-only API. Respond with ONLY a valid JSON object. No text before or after. No markdown. No explanation. No reasoning.",
             messages=[{"role": "user", "content": prompt}],
         )
         raw = message.content[0].text.strip()
+        # Extract JSON robustly in case model wraps it
         if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+            import re
+            match = re.search(r'```(?:json)?\s*(.*?)```', raw, re.DOTALL)
+            if match:
+                raw = match.group(1).strip()
+        elif not raw.startswith("{"):
+            import re
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                raw = match.group(0)
         result = json.loads(raw.strip())
         print(f"Matched known issues to Jira: {result}")
         return result
