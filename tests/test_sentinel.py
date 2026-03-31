@@ -144,6 +144,8 @@ class TestBuildSummaryCard:
 class TestBuildDetailThread:
     def test_clean_commit(self):
         findings = {
+            "verdict": "LGTM",
+            "summary": "Minor refactor",
             "security": [],
             "reliability": [],
             "architecture": [],
@@ -154,9 +156,30 @@ class TestBuildDetailThread:
         }
         text = sr.build_detail_thread(findings, [])
         assert "No issues found" in text
+        assert "LGTM" in text
+        assert "Minor refactor" in text
+
+    def test_always_includes_verdict_and_summary(self):
+        findings = {
+            "verdict": "NEEDS_ATTENTION",
+            "summary": "Added new endpoint without validation",
+            "security": [],
+            "reliability": ["Missing input validation"],
+            "architecture": [],
+            "performance": [],
+            "quality": [],
+            "good_changes": [],
+            "fixed_issues": [],
+        }
+        text = sr.build_detail_thread(findings, [])
+        assert "NEEDS_ATTENTION" in text
+        assert "Added new endpoint without validation" in text
+        assert "Missing input validation" in text
 
     def test_with_findings(self):
         findings = {
+            "verdict": "CRITICAL",
+            "summary": "Security issues found",
             "security": ["SQL injection risk"],
             "reliability": [],
             "architecture": [],
@@ -169,9 +192,12 @@ class TestBuildDetailThread:
         assert "SQL injection risk" in text
         assert "N+1 query" in text
         assert "Good error handling" in text
+        assert "CRITICAL" in text
 
     def test_with_fixed_issues(self):
         findings = {
+            "verdict": "LGTM",
+            "summary": "Fixed auth bug",
             "security": [],
             "reliability": [],
             "architecture": [],

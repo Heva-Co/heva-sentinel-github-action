@@ -195,7 +195,13 @@ def build_summary_card(findings: dict) -> dict:
 
 def build_detail_thread(findings: dict, known_issues: list) -> str:
     """Build the detailed findings as plain text for the thread reply."""
-    lines = [f"📋 *Full Review — {REPO_SHORT} @ {COMMIT_SHA}*\n"]
+    verdict = findings.get("verdict", "LGTM")
+    emoji = verdict_emoji(verdict)
+    lines = [
+        f"📋 *Full Review — {REPO_SHORT} @ {COMMIT_SHA}*",
+        f"*Verdict:* {emoji} {verdict}",
+        f"*Summary:* {findings.get('summary', 'N/A')}\n",
+    ]
 
     # Fixed issues
     fixed_ids = findings.get("fixed_issues", [])
