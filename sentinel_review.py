@@ -449,11 +449,11 @@ def jira_search_recent_bugs(days: int = 7) -> list:
         f"AND created >= -{days}d "
         f"ORDER BY created DESC"
     )
-    url = f"{JIRA_BASE_URL}/rest/api/3/search"
-    params = {"jql": jql, "maxResults": 20, "fields": "summary,description,status,key"}
+    url = f"{JIRA_BASE_URL}/rest/api/3/search/jql"
+    payload = {"jql": jql, "maxResults": 20, "fields": ["summary", "description", "status", "key"]}
 
     try:
-        resp = requests.get(url, headers=jira_headers(), params=params)
+        resp = requests.post(url, headers=jira_headers(), json=payload)
         if resp.status_code != 200:
             print(f"Jira search failed: {resp.status_code} {resp.text[:200]}")
             return []
