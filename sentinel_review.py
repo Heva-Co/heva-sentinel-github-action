@@ -26,6 +26,13 @@ BRANCH = os.environ.get("BRANCH", "dev")
 COMMIT_URL = os.environ.get("COMMIT_URL", "")
 THREAD_KEY = os.environ.get("THREAD_KEY", f"sentinel-{os.environ.get('REPO_SHORT', 'unknown')}-{datetime.utcnow().strftime('%Y-%m-%d')}-1")
 
+# ── Jira integration (optional) ───────────────────────────────────────────────
+JIRA_API_TOKEN = os.environ.get("JIRA_API_TOKEN", "")
+JIRA_EMAIL = os.environ.get("JIRA_EMAIL", "")
+JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
+JIRA_PROJECT_KEY = os.environ.get("JIRA_PROJECT_KEY", "")
+JIRA_ENABLED = all([JIRA_API_TOKEN, JIRA_EMAIL, JIRA_BASE_URL, JIRA_PROJECT_KEY])
+
 # ── Repo context (passed via action inputs) ──────────────────────────────────
 REPO_TYPE = os.environ.get("REPO_TYPE", "Unknown")
 REPO_STACK = os.environ.get("REPO_STACK", "Unknown")
@@ -401,6 +408,187 @@ def post_to_google_chat(message: dict, thread_key: str = None, reply: bool = Fal
     raise Exception("Google Chat post failed after 4 attempts")
 
 
+def jira_search_recent_bugs(days: int = 7) -> list:
+    """Search Jira for recent open bugs in the project."""
+    if not JIRA_ENABLED:
+        return []
+    from base64 import b64encode
+    auth = b64encode(f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()).decode()
+    headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
+
+    jql = (
+        f"project = {JIRA_PROJECT_KEY} AND issuetype = Bug "
+        f"AND status NOT IN (Done, Closed) "
+        f"AND created >= -{days}d "
+        f"ORDER BY created DESC"
+    )
+    url = f"{JIRA_BASE_URL}/rest/api/3/search"
+    params = {"jql": jql, "maxResults": 20, "fields": "summary,description,status,key"}
+
+    try:
+        resp = requests.get(url, headers=headers, params=params)
+        if resp.status_code != 200:
+            print(f"Jira search failed: {resp.status_code} {resp.text[:200]}")
+            return []
+        return resp.json().get("issues", [])
+    except Exception as e:
+        print(f"Jira search error: {e}")
+        return []
+
+
+def jira_match_bugs_to_findings(bugs: list, findings: dict) -> list:
+    """Use Claude to match Jira bugs to CRITICAL findings from this commit."""
+    if not bugs or findings.get("verdict") != "CRITICAL":
+        return []
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    bug_list = "\n".join(
+        f"- {b['key']}: {b['fields']['summary']}"
+        for b in bugs
+    )
+    critical_points = findings.get("critical_points", [])
+    all_findings = []
+    for cat in ["security", "reliability", "architecture", "performance", "quality"]:
+        all_findings.extend(findings.get(cat, []))
+
+    findings_text = "\n".join(f"- {f}" for f in all_findings)
+
+    prompt = f"""You are analyzing whether any of these Jira bug tickets could be caused by or related to a recent code commit.
+
+Commit: {COMMIT_SHA} by {AUTHOR}
+Message: {COMMIT_MSG}
+Repo: {REPO_SHORT}
+
+CRITICAL findings from this commit:
+{findings_text}
+
+Open Jira bugs (last 7 days):
+{bug_list}
+
+Return a JSON array of matched ticket keys that could plausibly be caused by or related to this commit's changes. Only include tickets where there is a reasonable connection — not speculative.
+
+Return format: {{"matched_tickets": ["TT-779", "TT-771"], "reasoning": {{"TT-779": "one line reason", "TT-771": "one line reason"}}}}
+
+If no matches, return: {{"matched_tickets": [], "reasoning": {{}}}}
+Return valid JSON only, no markdown."""
+
+    try:
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        return json.loads(raw.strip())
+    except Exception as e:
+        print(f"Jira matching failed: {e}")
+        return {"matched_tickets": [], "reasoning": {}}
+
+
+def jira_comment_on_tickets(match_result: dict, findings: dict):
+    """Post a comment on matched Jira tickets with root cause context."""
+    if not JIRA_ENABLED or not match_result.get("matched_tickets"):
+        return
+
+    from base64 import b64encode
+    auth = b64encode(f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()).decode()
+    headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
+
+    critical_points = findings.get("critical_points", [])
+    findings_text = "\n".join(f"• {p}" for p in critical_points) if critical_points else "See commit diff for details."
+
+    for ticket_key in match_result["matched_tickets"]:
+        reason = match_result.get("reasoning", {}).get(ticket_key, "Related to commit changes")
+
+        comment_body = {
+            "body": {
+                "version": 1,
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {"type": "text", "text": "🔍 Possible root cause identified by ", "marks": [{"type": "strong"}]},
+                            {"type": "text", "text": "Heva Code Sentinel", "marks": [{"type": "strong"}]}
+                        ]
+                    },
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {"type": "text", "text": f"Commit: "},
+                            {"type": "text", "text": COMMIT_SHA, "marks": [{"type": "code"}]},
+                            {"type": "text", "text": f" by {AUTHOR}"}
+                        ]
+                    },
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {"type": "text", "text": f"Repo: {REPO_SHORT}\nMessage: {COMMIT_MSG}"}
+                        ]
+                    },
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {"type": "text", "text": f"Why this may be related: ", "marks": [{"type": "strong"}]},
+                            {"type": "text", "text": reason}
+                        ]
+                    },
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {"type": "text", "text": f"CRITICAL findings:\n{findings_text}"}
+                        ]
+                    },
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {"type": "text", "text": f"Full review: ", "marks": [{"type": "em"}]},
+                            {
+                                "type": "text",
+                                "text": COMMIT_URL,
+                                "marks": [{"type": "link", "attrs": {"href": COMMIT_URL}}]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+
+        url = f"{JIRA_BASE_URL}/rest/api/3/issue/{ticket_key}/comment"
+        try:
+            resp = requests.post(url, headers=headers, json=comment_body)
+            if resp.status_code in (200, 201):
+                print(f"Posted comment on {ticket_key}")
+            else:
+                print(f"Failed to comment on {ticket_key}: {resp.status_code} {resp.text[:200]}")
+        except Exception as e:
+            print(f"Error commenting on {ticket_key}: {e}")
+
+
+def build_jira_section(match_result: dict) -> str:
+    """Build the Jira matched tickets section for Google Chat thread."""
+    matched = match_result.get("matched_tickets", [])
+    if not matched:
+        return ""
+    reasoning = match_result.get("reasoning", {})
+    lines = [
+        "─────────────────────",
+        "🎫 *Potentially Affected Jira Tickets*",
+    ]
+    for ticket in matched:
+        reason = reasoning.get(ticket, "")
+        ticket_url = f"{JIRA_BASE_URL}/browse/{ticket}"
+        reason_text = f" — {reason}" if reason else ""
+        lines.append(f"  • <{ticket_url}|{ticket}>{reason_text}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def main():
     missing = [k for k in ["ANTHROPIC_API_KEY", "GOOGLE_CHAT_WEBHOOK"] if not os.environ.get(k)]
     if missing:
@@ -427,7 +615,23 @@ def main():
     summary = build_summary_card(findings)
     post_to_google_chat(summary, thread_key=THREAD_KEY, reply=True)
 
+    # Jira integration — match CRITICAL findings to open bugs
+    jira_section = ""
+    if findings.get("verdict") == "CRITICAL" and JIRA_ENABLED:
+        print("Searching Jira for related bugs...")
+        bugs = jira_search_recent_bugs(days=7)
+        print(f"Found {len(bugs)} recent open bugs.")
+        if bugs:
+            match_result = jira_match_bugs_to_findings(bugs, findings)
+            matched = match_result.get("matched_tickets", [])
+            print(f"Matched {len(matched)} tickets: {matched}")
+            if matched:
+                jira_comment_on_tickets(match_result, findings)
+                jira_section = build_jira_section(match_result)
+
     detail_text = build_detail_thread(findings, known_issues)
+    if jira_section:
+        detail_text += "\n" + jira_section
     post_to_google_chat({"text": detail_text}, thread_key=THREAD_KEY, reply=True)
 
     persisted = auto_persist_critical_issues(findings, known_issues)
