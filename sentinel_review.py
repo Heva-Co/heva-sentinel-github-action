@@ -211,8 +211,8 @@ def build_summary_card(findings: dict) -> dict:
             "cardId": f"sentinel-{COMMIT_SHA}",
             "card": {
                 "header": {
-                    "title": f"{emoji} {REPO_SHORT} — {verdict}",
-                    "subtitle": f"Heva Code Sentinel  •  {timestamp}",
+                    "title": f"{emoji} {REPO_SHORT}",
+                    "subtitle": f"{verdict}  •  {timestamp}",
                     "imageUrl": "https://cdn-icons-png.flaticon.com/512/2092/2092663.png",
                     "imageType": "CIRCLE",
                 },
