@@ -312,19 +312,29 @@ def commit_and_push_known_issues():
 
 
 def post_to_google_chat(message: dict, thread_key: str = None, reply: bool = False) -> str:
-    """Post a message. Returns the thread name for replies."""
+    """Post a message with retry on 429. Returns the thread name for replies."""
+    import time
     url = GOOGLE_CHAT_WEBHOOK
     if thread_key:
         url += f"&threadKey={thread_key}"
         if reply:
             url += "&messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
 
-    response = requests.post(url, json=message, headers={"Content-Type": "application/json"})
-    if response.status_code != 200:
+    for attempt in range(4):
+        response = requests.post(url, json=message, headers={"Content-Type": "application/json"})
+        if response.status_code == 200:
+            print("Posted to Google Chat successfully.")
+            return response.json().get("thread", {}).get("name", "")
+        if response.status_code == 429:
+            wait = 2 ** attempt  # 1s, 2s, 4s, 8s
+            print(f"Rate limited (429), retrying in {wait}s... (attempt {attempt + 1}/4)")
+            time.sleep(wait)
+            continue
         print(f"Failed to post to Google Chat: {response.status_code} {response.text}")
         raise Exception("Google Chat post failed")
-    print("Posted to Google Chat successfully.")
-    return response.json().get("thread", {}).get("name", "")
+
+    print(f"Failed to post to Google Chat after retries: {response.status_code} {response.text}")
+    raise Exception("Google Chat post failed after 4 attempts")
 
 
 def main():
