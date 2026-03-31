@@ -179,14 +179,14 @@ def build_summary_card(findings: dict) -> dict:
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
     counts = {
-        "🔐": len(findings.get("security", [])),
-        "⚡": len(findings.get("reliability", [])),
-        "🏗️": len(findings.get("architecture", [])),
-        "🚀": len(findings.get("performance", [])),
-        "🧹": len(findings.get("quality", [])),
+        ("🔐", "Security"): len(findings.get("security", [])),
+        ("⚡", "Reliability"): len(findings.get("reliability", [])),
+        ("🏗️", "Architecture"): len(findings.get("architecture", [])),
+        ("🚀", "Performance"): len(findings.get("performance", [])),
+        ("🧹", "Code Quality"): len(findings.get("quality", [])),
     }
     fixed_ids = findings.get("fixed_issues", [])
-    issue_summary = "  ".join(f"{icon} {n}" for icon, n in counts.items() if n > 0) or "No issues"
+    issue_summary = "  ".join(f"{icon} {label}: {n}" for (icon, label), n in counts.items() if n > 0) or "No issues"
     fixed_text = f"  🎉 Fixed: {len(fixed_ids)}" if fixed_ids else ""
 
     body = (
