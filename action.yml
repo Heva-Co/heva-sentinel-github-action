@@ -30,6 +30,10 @@ inputs:
   review-focus:
     description: "What the reviewer should focus on (e.g. 'API contracts, DB transactions, error handling')"
     required: true
+  thread-key:
+    description: "Google Chat thread key for grouping messages (daily + capped at 10 replies)"
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -60,4 +64,5 @@ runs:
         REPO_TYPE: ${{ inputs.repo-type }}
         REPO_STACK: ${{ inputs.repo-stack }}
         REVIEW_FOCUS: ${{ inputs.review-focus }}
+        THREAD_KEY: ${{ inputs.thread-key }}
       run: python3 ${{ github.action_path }}/sentinel_review.py

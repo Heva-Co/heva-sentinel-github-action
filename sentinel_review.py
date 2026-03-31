@@ -24,11 +24,19 @@ COMMIT_MSG = os.environ.get("COMMIT_MSG", "No message")
 AUTHOR = os.environ.get("AUTHOR", "Unknown")
 BRANCH = os.environ.get("BRANCH", "dev")
 COMMIT_URL = os.environ.get("COMMIT_URL", "")
+THREAD_KEY = os.environ.get("THREAD_KEY", f"sentinel-{os.environ.get('REPO_SHORT', 'unknown')}-{datetime.utcnow().strftime('%Y-%m-%d')}-1")
 
 # ── Repo context (passed via action inputs) ──────────────────────────────────
 REPO_TYPE = os.environ.get("REPO_TYPE", "Unknown")
 REPO_STACK = os.environ.get("REPO_STACK", "Unknown")
 REVIEW_FOCUS = os.environ.get("REVIEW_FOCUS", "General code quality, security, reliability")
+
+# ── Model pricing (USD per 1M tokens) ────────────────────────────────────────
+MODEL_PRICING = {
+    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
+    "claude-sonnet-4-6":         {"input": 3.00, "output": 15.00},
+    "claude-opus-4-6":           {"input": 15.00, "output": 75.00},
+}
 
 
 def load_known_issues() -> list:
@@ -117,6 +125,12 @@ Rules:
         messages=[{"role": "user", "content": prompt}],
     )
 
+    # Cost tracking
+    pricing = MODEL_PRICING.get(CLAUDE_MODEL, {"input": 3.00, "output": 15.00})
+    input_tokens = message.usage.input_tokens
+    output_tokens = message.usage.output_tokens
+    total_cost = (input_tokens / 1_000_000) * pricing["input"] + (output_tokens / 1_000_000) * pricing["output"]
+
     raw = message.content[0].text.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
@@ -140,6 +154,13 @@ Rules:
         if not isinstance(parsed.get(field), list):
             parsed[field] = []
 
+    parsed["_cost"] = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_usd": round(total_cost, 6),
+        "model": CLAUDE_MODEL,
+    }
+
     return parsed
 
 
@@ -157,7 +178,6 @@ def build_summary_card(findings: dict) -> dict:
     emoji = verdict_emoji(verdict)
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
-    # Count issues per category
     counts = {
         "🔐": len(findings.get("security", [])),
         "⚡": len(findings.get("reliability", [])),
@@ -203,16 +223,25 @@ def build_detail_thread(findings: dict, known_issues: list) -> str:
         f"*Summary:* {findings.get('summary', 'N/A')}\n",
     ]
 
-    # Fixed issues
+    severity_emoji = {"CRITICAL": "🚨", "HIGH": "⚠️", "MEDIUM": "🔶", "LOW": "🔵"}
+
+    # Fixed issues — shown only when fixed, then removed from known_issues.json
     fixed_ids = findings.get("fixed_issues", [])
     if fixed_ids and known_issues:
         fixed_map = {i["id"]: i for i in known_issues}
-        fixed_lines = [f"  ✅ [{fid}] {fixed_map[fid]['title']}" for fid in fixed_ids if fid in fixed_map]
+        fixed_lines = []
+        for fid in fixed_ids:
+            if fid in fixed_map:
+                issue = fixed_map[fid]
+                sev = severity_emoji.get(issue["severity"], "•")
+                fixed_lines.append(f"  {sev} [{fid}] {issue['title']}")
         if fixed_lines:
-            lines.append("🎉 *Fixed in This Commit*")
+            lines.append("─────────────────────")
+            lines.append("🎉 *Fixed in This Commit* _(won't appear again)_")
             lines.extend(fixed_lines)
             lines.append("")
 
+    # New issues found in this diff
     categories = [
         ("🔐 Security", findings.get("security", [])),
         ("⚡ Reliability", findings.get("reliability", [])),
@@ -229,7 +258,24 @@ def build_detail_thread(findings: dict, known_issues: list) -> str:
             lines.append("")
 
     if not any(items for _, items in categories) and not fixed_ids:
-        lines.append("No issues found. Clean commit. ✨")
+        lines.append("No issues found. Clean commit. ✨\n")
+
+    # Still open known issues — always show so team stays aware
+    still_open = [i for i in known_issues if i["id"] not in fixed_ids]
+    if still_open:
+        lines.append("─────────────────────")
+        lines.append("📌 *Still Open — Known Issues*")
+        for issue in still_open:
+            sev = severity_emoji.get(issue["severity"], "•")
+            lines.append(f"  {sev} [{issue['id']}] {issue['title']}")
+        lines.append("")
+
+    # Cost footer
+    cost = findings.get("_cost", {})
+    if cost:
+        model_short = cost.get("model", CLAUDE_MODEL).replace("claude-", "").replace("-20251001", "")
+        lines.append("─────────────────────")
+        lines.append(f"💰 *Review cost:* ${cost['total_usd']:.4f} | {cost['input_tokens']:,} in / {cost['output_tokens']:,} out tokens _({model_short})_")
 
     return "\n".join(lines)
 
@@ -282,12 +328,11 @@ def post_to_google_chat(message: dict, thread_key: str = None, reply: bool = Fal
 
 
 def main():
-    # Validate secrets are present without printing their values
     missing = [k for k in ["ANTHROPIC_API_KEY", "GOOGLE_CHAT_WEBHOOK"] if not os.environ.get(k)]
     if missing:
         raise SystemExit(f"Missing required secrets: {', '.join(missing)}")
 
-    print(f"Running Heva Code Sentinel for {REPO_SHORT} @ {COMMIT_SHA}")
+    print(f"Running Heva Code Sentinel for {REPO_SHORT} @ {COMMIT_SHA} using {CLAUDE_MODEL}")
     known_issues = load_known_issues()
     print(f"Loaded {len(known_issues)} known issues.")
 
@@ -300,24 +345,17 @@ def main():
     try:
         findings = review_with_claude(stat, diff, known_issues)
     except (ValueError, KeyError) as e:
-        # Raise without printing env vars or secrets
         raise SystemExit(f"Review failed: {e}")
 
-    print(f"Verdict: {findings.get('verdict')}")
+    print(f"Verdict: {findings.get('verdict')} | Cost: ${findings.get('_cost', {}).get('total_usd', 0):.4f}")
     fixed_ids = findings.get("fixed_issues", [])
-    print(f"Fixed issues: {fixed_ids}")
 
-    thread_key = f"sentinel-{REPO_SHORT}-{COMMIT_SHA}"
-
-    # Post compact summary card
     summary = build_summary_card(findings)
-    post_to_google_chat(summary, thread_key=thread_key)
+    post_to_google_chat(summary, thread_key=THREAD_KEY, reply=True)
 
-    # Post full details as thread reply
     detail_text = build_detail_thread(findings, known_issues)
-    post_to_google_chat({"text": detail_text}, thread_key=thread_key, reply=True)
+    post_to_google_chat({"text": detail_text}, thread_key=THREAD_KEY, reply=True)
 
-    # Remove fixed issues from known_issues.json so they never repeat
     if remove_fixed_issues(fixed_ids, known_issues):
         commit_and_push_known_issues()
 
