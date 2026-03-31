@@ -25,7 +25,7 @@ jobs:
         with:
           fetch-depth: 2
 
-      - uses: heva-care/heva-sentinel-actions@v1
+      - uses: Heva-Co/heva-sentinel-github-action@v0.1
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           google-chat-webhook: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
