@@ -64,7 +64,7 @@ def get_diff():
         return "Could not get diff", ""
 
 
-REQUIRED_FIELDS = {"summary", "security", "reliability", "architecture", "performance", "quality", "good_changes", "fixed_issues", "verdict"}
+REQUIRED_FIELDS = {"summary", "security", "reliability", "architecture", "performance", "quality", "good_changes", "fixed_issues", "critical_points", "verdict"}
 VALID_VERDICTS = {"LGTM", "NEEDS_ATTENTION", "CRITICAL"}
 
 
@@ -114,6 +114,7 @@ Review this diff and return a JSON object with ONLY these fields:
   "quality": ["list of code quality issues, empty if none"],
   "good_changes": ["list of positive things worth noting, max 2"],
   "fixed_issues": ["list of known issue IDs (e.g. IA-001) that this diff clearly fixes, empty if none"],
+  "critical_points": ["list of exact finding strings that caused CRITICAL verdict, copied verbatim from their category, empty if verdict is not CRITICAL"],
   "verdict": "LGTM" | "NEEDS_ATTENTION" | "CRITICAL"
 }}
 
@@ -122,6 +123,7 @@ Rules:
 - Security issues in healthcare code are CRITICAL (PHI, auth, injection)
 - Keep each finding under 15 words
 - For fixed_issues: only include an ID if the diff clearly addresses that specific issue
+- For critical_points: copy the exact finding string(s) from security/reliability/etc that triggered CRITICAL
 - verdict = CRITICAL if any security or data integrity risk
 - verdict = NEEDS_ATTENTION if reliability/arch concerns
 - verdict = LGTM if clean commit
@@ -159,7 +161,7 @@ Rules:
     if parsed["verdict"] not in VALID_VERDICTS:
         parsed["verdict"] = "NEEDS_ATTENTION"
 
-    for field in ["security", "reliability", "architecture", "performance", "quality", "good_changes", "fixed_issues"]:
+    for field in ["security", "reliability", "architecture", "performance", "quality", "good_changes", "fixed_issues", "critical_points"]:
         if not isinstance(parsed.get(field), list):
             parsed[field] = []
 
@@ -260,10 +262,13 @@ def build_detail_thread(findings: dict, known_issues: list) -> str:
         ("👍 Good Changes", findings.get("good_changes", [])),
     ]
 
+    critical_points = set(findings.get("critical_points", []))
     for label, items in categories:
         if items:
             lines.append(f"*{label}*")
-            lines.extend(f"  • {item}" for item in items)
+            for item in items:
+                prefix = "🚨" if item in critical_points else "  •"
+                lines.append(f"{prefix} {item}")
             lines.append("")
 
     if not any(items for _, items in categories) and not fixed_ids:
