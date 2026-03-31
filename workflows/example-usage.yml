@@ -1,0 +1,29 @@
+# Copy this file to .github/workflows/code-sentinel.yml in any repo
+name: Heva Code Sentinel
+
+on:
+  push:
+    branches: [dev]
+
+jobs:
+  sentinel-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Run Sentinel Review
+        uses: heva-care/heva-sentinel-actions@v1
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          google-chat-webhook: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
+          repo-type: "Go backend"
+          repo-stack: "Go, PostgreSQL, Neo4j, GORM, Gin, Stripe, GCP"
+          review-focus: "API contracts, DB transactions, advisory locks, concurrency safety, payment flows, error handling"
+          # Optional overrides:
+          # claude-model: "claude-haiku-4-5-20251001"
+          # diff-max-chars: "12000"
