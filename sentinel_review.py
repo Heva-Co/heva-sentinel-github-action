@@ -261,7 +261,7 @@ def build_summary_card(findings: dict) -> dict:
     }
 
 
-def build_detail_thread(findings: dict, known_issues: list) -> str:
+def build_detail_thread(findings: dict, known_issues: list, jira_links: dict = None) -> str:
     """Build the detailed findings as plain text for the thread reply."""
     verdict = findings.get("verdict", "LGTM")
     emoji = verdict_emoji(verdict)
@@ -314,11 +314,19 @@ def build_detail_thread(findings: dict, known_issues: list) -> str:
     # Still open known issues — always show so team stays aware
     still_open = [i for i in known_issues if i["id"] not in fixed_ids and not i.get("suppressed")]
     if still_open:
+        jira_map = jira_links or {}
         lines.append("─────────────────────")
         lines.append("📌 *Still Open — Known Issues*")
         for issue in still_open:
             sev = severity_emoji.get(issue["severity"], "•")
-            lines.append(f"  {sev} [{issue['id']}] {issue['title']}")
+            ticket_keys = jira_map.get(issue["id"], [])
+            if ticket_keys:
+                jira_text = "  ".join(
+                    f"<https://heva-co.atlassian.net/browse/{t}|🎫 {t}>" for t in ticket_keys
+                )
+                lines.append(f"  {sev} [{issue['id']}] {issue['title']}  →  {jira_text}")
+            else:
+                lines.append(f"  {sev} [{issue['id']}] {issue['title']}")
         lines.append("")
 
     # Suppressed issues — intentional business decisions, shown for audit trail
@@ -595,6 +603,79 @@ def jira_comment_on_tickets(match_result: dict, findings: dict):
             print(f"Error commenting on {ticket_key}: {e}")
 
 
+def jira_match_known_issues_to_bugs(known_issues: list) -> dict:
+    """Match existing known CRITICAL/HIGH issues to open Jira bugs. Returns {issue_id: [ticket_keys]}."""
+    if not JIRA_ENABLED:
+        return {}
+
+    critical_high = [i for i in known_issues if i.get("severity") in ("CRITICAL", "HIGH") and not i.get("suppressed")]
+    if not critical_high:
+        return {}
+
+    # Search broader — all open bugs, not just last 7 days
+    jql = (
+        f"project = {JIRA_PROJECT_KEY} AND issuetype = Bug "
+        f"AND status NOT IN (Done, Closed) "
+        f"ORDER BY created DESC"
+    )
+    url = f"{JIRA_BASE_URL}/rest/api/3/search/jql"
+    payload = {"jql": jql, "maxResults": 50, "fields": ["summary", "status", "key"]}
+
+    try:
+        resp = requests.post(url, headers=jira_headers(), json=payload)
+        if resp.status_code != 200:
+            print(f"Jira known-issue search failed: {resp.status_code}")
+            return {}
+        bugs = resp.json().get("issues", [])
+    except Exception as e:
+        print(f"Jira known-issue search error: {e}")
+        return {}
+
+    if not bugs:
+        return {}
+
+    # Use Claude Haiku to match known issues to Jira bugs
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    issues_text = "\n".join(
+        f"- {i['id']} ({i['severity']}): {i['title']}" + (f" | {i.get('detail', '')}" if i.get('detail') else "")
+        for i in critical_high
+    )
+    bugs_text = "\n".join(f"- {b['key']}: {b['fields']['summary']}" for b in bugs)
+
+    prompt = f"""Match these known code issues to Jira bug tickets that could be symptoms of the same root cause.
+
+Known code issues:
+{issues_text}
+
+Open Jira bugs:
+{bugs_text}
+
+Return a JSON object mapping issue IDs to arrays of matched Jira ticket keys.
+Only include matches where there's a plausible connection (e.g., the Jira bug is a symptom of the code issue).
+
+Return format: {{"IA-001": ["TT-123"], "IA-009": ["TT-783", "TT-787"]}}
+If no matches for an issue, omit it. Return valid JSON only, no markdown."""
+
+    try:
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        result = json.loads(raw.strip())
+        print(f"Matched known issues to Jira: {result}")
+        return result
+    except Exception as e:
+        print(f"Jira known-issue matching failed: {e}")
+        return {}
+
+
 def build_jira_section(match_result: dict) -> str:
     """Build the Jira matched tickets section for Google Chat thread."""
     matched = match_result.get("matched_tickets", [])
@@ -640,10 +721,10 @@ def main():
     summary = build_summary_card(findings)
     post_to_google_chat(summary, thread_key=THREAD_KEY, reply=True)
 
-    # Jira integration — match CRITICAL findings to open bugs
+    # Jira integration — match CRITICAL findings to open bugs (new commit)
     jira_section = ""
     if findings.get("verdict") == "CRITICAL" and JIRA_ENABLED:
-        print("Searching Jira for related bugs...")
+        print("Searching Jira for related bugs (new findings)...")
         bugs = jira_search_recent_bugs(days=7)
         print(f"Found {len(bugs)} recent open bugs.")
         if bugs:
@@ -654,7 +735,13 @@ def main():
                 jira_comment_on_tickets(match_result, findings)
                 jira_section = build_jira_section(match_result)
 
-    detail_text = build_detail_thread(findings, known_issues)
+    # Jira integration — match existing known issues to Jira bugs (always runs)
+    jira_links = {}
+    if JIRA_ENABLED and known_issues:
+        print("Matching known issues to Jira tickets...")
+        jira_links = jira_match_known_issues_to_bugs(known_issues)
+
+    detail_text = build_detail_thread(findings, known_issues, jira_links=jira_links)
     if jira_section:
         detail_text += "\n" + jira_section
     post_to_google_chat({"text": detail_text}, thread_key=THREAD_KEY, reply=True)
