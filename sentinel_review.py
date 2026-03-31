@@ -26,12 +26,42 @@ BRANCH = os.environ.get("BRANCH", "dev")
 COMMIT_URL = os.environ.get("COMMIT_URL", "")
 THREAD_KEY = os.environ.get("THREAD_KEY", f"sentinel-{os.environ.get('REPO_SHORT', 'unknown')}-{datetime.utcnow().strftime('%Y-%m-%d')}-1")
 
-# ── Jira integration (optional) ───────────────────────────────────────────────
-JIRA_API_TOKEN = os.environ.get("JIRA_API_TOKEN", "")
-JIRA_EMAIL = os.environ.get("JIRA_EMAIL", "")
-JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
+# ── Jira integration (OAuth 2.0 service account) ─────────────────────────────
+JIRA_CLIENT_ID = os.environ.get("JIRA_CLIENT_ID", "")
+JIRA_CLIENT_SECRET = os.environ.get("JIRA_CLIENT_SECRET", "")
+JIRA_CLOUD_ID = os.environ.get("JIRA_CLOUD_ID", "")
 JIRA_PROJECT_KEY = os.environ.get("JIRA_PROJECT_KEY", "")
-JIRA_ENABLED = all([JIRA_API_TOKEN, JIRA_EMAIL, JIRA_BASE_URL, JIRA_PROJECT_KEY])
+JIRA_BASE_URL = f"https://api.atlassian.com/ex/jira/{JIRA_CLOUD_ID}" if JIRA_CLOUD_ID else ""
+JIRA_ENABLED = all([JIRA_CLIENT_ID, JIRA_CLIENT_SECRET, JIRA_CLOUD_ID, JIRA_PROJECT_KEY])
+_jira_access_token = ""
+
+
+def jira_get_access_token() -> str:
+    """Fetch a fresh OAuth 2.0 access token using client credentials grant."""
+    global _jira_access_token
+    if _jira_access_token:
+        return _jira_access_token
+
+    resp = requests.post(
+        "https://auth.atlassian.com/oauth/token",
+        json={
+            "grant_type": "client_credentials",
+            "client_id": JIRA_CLIENT_ID,
+            "client_secret": JIRA_CLIENT_SECRET,
+        },
+        headers={"Content-Type": "application/json"},
+    )
+    if resp.status_code != 200:
+        print(f"Jira OAuth token fetch failed: {resp.status_code} {resp.text[:200]}")
+        return ""
+    _jira_access_token = resp.json().get("access_token", "")
+    return _jira_access_token
+
+
+def jira_headers() -> dict:
+    """Return auth headers for Jira API calls."""
+    token = jira_get_access_token()
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 # ── Repo context (passed via action inputs) ──────────────────────────────────
 REPO_TYPE = os.environ.get("REPO_TYPE", "Unknown")
@@ -412,9 +442,6 @@ def jira_search_recent_bugs(days: int = 7) -> list:
     """Search Jira for recent open bugs in the project."""
     if not JIRA_ENABLED:
         return []
-    from base64 import b64encode
-    auth = b64encode(f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()).decode()
-    headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
 
     jql = (
         f"project = {JIRA_PROJECT_KEY} AND issuetype = Bug "
@@ -426,7 +453,7 @@ def jira_search_recent_bugs(days: int = 7) -> list:
     params = {"jql": jql, "maxResults": 20, "fields": "summary,description,status,key"}
 
     try:
-        resp = requests.get(url, headers=headers, params=params)
+        resp = requests.get(url, headers=jira_headers(), params=params)
         if resp.status_code != 200:
             print(f"Jira search failed: {resp.status_code} {resp.text[:200]}")
             return []
@@ -495,9 +522,7 @@ def jira_comment_on_tickets(match_result: dict, findings: dict):
     if not JIRA_ENABLED or not match_result.get("matched_tickets"):
         return
 
-    from base64 import b64encode
-    auth = b64encode(f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()).decode()
-    headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
+    headers = jira_headers()
 
     critical_points = findings.get("critical_points", [])
     findings_text = "\n".join(f"• {p}" for p in critical_points) if critical_points else "See commit diff for details."
@@ -582,7 +607,7 @@ def build_jira_section(match_result: dict) -> str:
     ]
     for ticket in matched:
         reason = reasoning.get(ticket, "")
-        ticket_url = f"{JIRA_BASE_URL}/browse/{ticket}"
+        ticket_url = f"https://heva-co.atlassian.net/browse/{ticket}"
         reason_text = f" — {reason}" if reason else ""
         lines.append(f"  • <{ticket_url}|{ticket}>{reason_text}")
     lines.append("")

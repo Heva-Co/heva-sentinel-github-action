@@ -34,16 +34,16 @@ inputs:
     description: "Google Chat thread key for grouping messages (daily + capped at 10 replies)"
     required: false
     default: ""
-  jira-api-token:
-    description: "Jira API token for posting comments on matched tickets"
+  jira-client-id:
+    description: "Jira OAuth 2.0 service account client ID"
     required: false
     default: ""
-  jira-email:
-    description: "Jira account email for API auth"
+  jira-client-secret:
+    description: "Jira OAuth 2.0 service account client secret"
     required: false
     default: ""
-  jira-base-url:
-    description: "Jira base URL (e.g. https://heva-co.atlassian.net)"
+  jira-cloud-id:
+    description: "Jira cloud ID (UUID from your Atlassian site)"
     required: false
     default: ""
   jira-project-key:
@@ -81,8 +81,8 @@ runs:
         REPO_STACK: ${{ inputs.repo-stack }}
         REVIEW_FOCUS: ${{ inputs.review-focus }}
         THREAD_KEY: ${{ inputs.thread-key }}
-        JIRA_API_TOKEN: ${{ inputs.jira-api-token }}
-        JIRA_EMAIL: ${{ inputs.jira-email }}
-        JIRA_BASE_URL: ${{ inputs.jira-base-url }}
+        JIRA_CLIENT_ID: ${{ inputs.jira-client-id }}
+        JIRA_CLIENT_SECRET: ${{ inputs.jira-client-secret }}
+        JIRA_CLOUD_ID: ${{ inputs.jira-cloud-id }}
         JIRA_PROJECT_KEY: ${{ inputs.jira-project-key }}
       run: python3 ${{ github.action_path }}/sentinel_review.py
