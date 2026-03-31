@@ -72,11 +72,20 @@ def review_with_claude(stat: str, diff: str, known_issues: list) -> dict:
     """Call Claude API to review the diff and return structured findings."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+    # Separate suppressed (business context) from open issues
+    open_issues = [i for i in known_issues if not i.get("suppressed")]
+    suppressed_issues = [i for i in known_issues if i.get("suppressed")]
+
     known_issues_text = ""
-    if known_issues:
+    if open_issues:
         known_issues_text = "\n\nKNOWN EXISTING ISSUES TO CHECK IF FIXED:\n"
-        for issue in known_issues:
+        for issue in open_issues:
             known_issues_text += f"- [{issue['id']}] ({issue['severity']}) {issue['title']} | hint: {issue.get('file_hint', '')}\n"
+
+    if suppressed_issues:
+        known_issues_text += "\n\nSUPPRESSED — INTENTIONAL BUSINESS DECISIONS (DO NOT FLAG):\n"
+        for issue in suppressed_issues:
+            known_issues_text += f"- {issue['title']}: {issue.get('detail', '')}\n"
 
     prompt = f"""You are Heva Code Sentinel — a senior engineer reviewing code changes for the Heva healthcare platform.
 
@@ -261,13 +270,22 @@ def build_detail_thread(findings: dict, known_issues: list) -> str:
         lines.append("No issues found. Clean commit. ✨\n")
 
     # Still open known issues — always show so team stays aware
-    still_open = [i for i in known_issues if i["id"] not in fixed_ids]
+    still_open = [i for i in known_issues if i["id"] not in fixed_ids and not i.get("suppressed")]
     if still_open:
         lines.append("─────────────────────")
         lines.append("📌 *Still Open — Known Issues*")
         for issue in still_open:
             sev = severity_emoji.get(issue["severity"], "•")
             lines.append(f"  {sev} [{issue['id']}] {issue['title']}")
+        lines.append("")
+
+    # Suppressed issues — intentional business decisions, shown for audit trail
+    suppressed = [i for i in known_issues if i.get("suppressed")]
+    if suppressed:
+        lines.append("─────────────────────")
+        lines.append("🔕 *Suppressed — Intentional Business Decisions*")
+        for issue in suppressed:
+            lines.append(f"  • [{issue['id']}] {issue['title']}")
         lines.append("")
 
     # Cost footer
@@ -287,7 +305,7 @@ def remove_fixed_issues(fixed_ids: list, known_issues: list) -> bool:
     issues_path = Path(".github/sentinel/known_issues.json")
     if not issues_path.exists():
         return False
-    remaining = [i for i in known_issues if i["id"] not in fixed_ids]
+    remaining = [i for i in known_issues if i["id"] not in fixed_ids or i.get("suppressed")]
     if len(remaining) == len(known_issues):
         return False
     with open(issues_path, "w") as f:
