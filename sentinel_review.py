@@ -510,7 +510,7 @@ Return valid JSON only, no markdown."""
 
     try:
         message = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=512,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -634,7 +634,7 @@ def jira_match_known_issues_to_bugs(known_issues: list) -> dict:
     if not bugs:
         return {}
 
-    # Use Claude Haiku to match known issues to Jira bugs
+    # Use Claude Sonnet to match known issues to Jira bugs (better precision than Haiku)
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     issues_text = "\n".join(
@@ -643,7 +643,17 @@ def jira_match_known_issues_to_bugs(known_issues: list) -> dict:
     )
     bugs_text = "\n".join(f"- {b['key']}: {b['fields']['summary']}" for b in bugs)
 
-    prompt = f"""Match these known code issues to Jira bug tickets that could be symptoms of the same root cause.
+    prompt = f"""You are matching known CODE-LEVEL issues (bugs found in source code review) to USER-FACING Jira bug tickets.
+
+A match means: the code issue DIRECTLY causes or could directly cause the user-facing bug described in the Jira ticket.
+
+STRICT RULES:
+- Only match when the code issue is a DIRECT root cause of the Jira bug symptom
+- Do NOT match based on vague thematic similarity (e.g. "both involve validation" or "both involve failures")
+- Do NOT match an issue to a ticket just because they're in the same domain area
+- A code issue about nudges should NOT match escalation tickets
+- A code issue about input sanitization should NOT match unrelated validation errors
+- When in doubt, do NOT include the match
 
 Known code issues:
 {issues_text}
@@ -652,14 +662,13 @@ Open Jira bugs:
 {bugs_text}
 
 Return a JSON object mapping issue IDs to arrays of matched Jira ticket keys.
-Only include matches where there's a plausible connection (e.g., the Jira bug is a symptom of the code issue).
 
-Return format: {{"IA-001": ["TT-123"], "IA-009": ["TT-783", "TT-787"]}}
-If no matches for an issue, omit it. Return valid JSON only, no markdown."""
+Return format: {{"IA-009": ["TT-783", "TT-787"]}}
+If no confident matches for an issue, omit it entirely. Return valid JSON only, no markdown."""
 
     try:
         message = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=512,
             messages=[{"role": "user", "content": prompt}],
         )
