@@ -525,8 +525,102 @@ Return valid JSON only, no markdown."""
         return {"matched_tickets": [], "reasoning": {}}
 
 
+def jira_fetch_sentinel_comments(ticket_key: str) -> list:
+    """Fetch existing heva-code-sentinel comments on a Jira ticket."""
+    url = f"{JIRA_BASE_URL}/rest/api/3/issue/{ticket_key}/comment"
+    try:
+        resp = requests.get(url, headers=jira_headers(), params={"maxResults": 50})
+        if resp.status_code != 200:
+            print(f"Failed to fetch comments for {ticket_key}: {resp.status_code}")
+            return []
+        comments = resp.json().get("comments", [])
+        # Filter to sentinel comments only (by display name or content marker)
+        sentinel_comments = []
+        for c in comments:
+            author_name = c.get("author", {}).get("displayName", "")
+            # Check if authored by sentinel or contains sentinel marker
+            body_text = json.dumps(c.get("body", {}))
+            is_sentinel = (
+                "heva-code-sentinel" in author_name.lower()
+                or "Heva Code Sentinel" in body_text
+                or "Possible root cause identified by" in body_text
+            )
+            if is_sentinel:
+                # Extract plain text from ADF body
+                plain_text = _extract_adf_text(c.get("body", {}))
+                sentinel_comments.append({
+                    "id": c.get("id"),
+                    "created": c.get("created", ""),
+                    "text": plain_text,
+                })
+        return sentinel_comments
+    except Exception as e:
+        print(f"Error fetching comments for {ticket_key}: {e}")
+        return []
+
+
+def _extract_adf_text(adf_body: dict) -> str:
+    """Extract plain text from Atlassian Document Format body."""
+    texts = []
+    def _walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "text":
+                texts.append(node.get("text", ""))
+            for child in node.get("content", []):
+                _walk(child)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+    _walk(adf_body)
+    return " ".join(texts)
+
+
+def jira_is_new_finding(ticket_key: str, new_reason: str, new_findings: str, existing_comments: list) -> bool:
+    """Use Sonnet to determine if a new finding is genuinely different from existing sentinel comments."""
+    if not existing_comments:
+        return True  # No existing comments — always post
+
+    existing_text = "\n---\n".join(
+        f"Comment {i+1} (posted {c['created'][:10]}):\n{c['text']}"
+        for i, c in enumerate(existing_comments)
+    )
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    try:
+        message = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=128,
+            system="You are a deduplication checker. Respond with ONLY 'NEW' or 'DUPLICATE'. No other text.",
+            messages=[{"role": "user", "content": f"""Compare a NEW proposed comment to EXISTING sentinel comments on Jira ticket {ticket_key}.
+
+EXISTING comments already posted:
+{existing_text}
+
+NEW proposed comment:
+Commit: {COMMIT_SHA} by {AUTHOR}
+Why this may be related: {new_reason}
+Findings: {new_findings}
+
+Is the NEW comment identifying a GENUINELY DIFFERENT root cause or code issue compared to what's already posted?
+
+Rules:
+- If the new comment identifies a different code path, different function, different failure mode → respond NEW
+- If the new comment restates the same root cause (same IA-xxx issue, same function, same reasoning) just from a different commit → respond DUPLICATE
+- If the new comment says "issue X still not fixed" and an existing comment already identifies issue X → respond DUPLICATE
+- If the new commit actually FIXES an issue mentioned in existing comments → respond NEW (status update is valuable)
+
+Respond with ONLY 'NEW' or 'DUPLICATE'."""}],
+        )
+        verdict = message.content[0].text.strip().upper()
+        print(f"Dedup check for {ticket_key}: {verdict}")
+        return verdict == "NEW"
+    except Exception as e:
+        print(f"Dedup check failed for {ticket_key}, posting anyway: {e}")
+        return True  # On error, post to be safe
+
+
 def jira_comment_on_tickets(match_result: dict, findings: dict):
-    """Post a comment on matched Jira tickets with root cause context."""
+    """Post a comment on matched Jira tickets with root cause context. Skips duplicates."""
     if not JIRA_ENABLED or not match_result.get("matched_tickets"):
         return
 
@@ -537,6 +631,14 @@ def jira_comment_on_tickets(match_result: dict, findings: dict):
 
     for ticket_key in match_result["matched_tickets"]:
         reason = match_result.get("reasoning", {}).get(ticket_key, "Related to commit changes")
+
+        # Dedup: fetch existing sentinel comments and check if this is genuinely new
+        existing = jira_fetch_sentinel_comments(ticket_key)
+        if existing:
+            print(f"Found {len(existing)} existing sentinel comments on {ticket_key}, checking for duplicates...")
+            if not jira_is_new_finding(ticket_key, reason, findings_text, existing):
+                print(f"SKIPPING {ticket_key} — duplicate finding (already covered by existing comments)")
+                continue
 
         comment_body = {
             "body": {
