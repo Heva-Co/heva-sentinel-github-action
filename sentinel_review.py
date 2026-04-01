@@ -622,16 +622,24 @@ def jira_match_known_issues_to_bugs(known_issues: list) -> dict:
     payload = {"jql": jql, "maxResults": 50, "fields": ["summary", "status", "key"]}
 
     try:
+        token = jira_get_access_token()
+        if not token:
+            print("Jira known-issue matching skipped: OAuth token fetch failed")
+            return {}
+        print(f"Jira OAuth token acquired ({len(token)} chars)")
         resp = requests.post(url, headers=jira_headers(), json=payload)
+        print(f"Jira search response: {resp.status_code}")
         if resp.status_code != 200:
-            print(f"Jira known-issue search failed: {resp.status_code}")
+            print(f"Jira known-issue search failed: {resp.status_code} {resp.text[:300]}")
             return {}
         bugs = resp.json().get("issues", [])
+        print(f"Found {len(bugs)} open Jira bugs for matching")
     except Exception as e:
         print(f"Jira known-issue search error: {e}")
         return {}
 
     if not bugs:
+        print("No open Jira bugs found — skipping matching")
         return {}
 
     # Use Claude Sonnet to match known issues to Jira bugs (better precision than Haiku)
@@ -667,6 +675,7 @@ Return format: {{"IA-009": ["TT-783", "TT-787"]}}
 If no confident matches for an issue, omit it entirely. Return valid JSON only, no markdown."""
 
     try:
+        print(f"Calling Sonnet to match {len(critical_high)} issues against {len(bugs)} bugs...")
         message = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1024,
@@ -674,17 +683,18 @@ If no confident matches for an issue, omit it entirely. Return valid JSON only, 
             messages=[{"role": "user", "content": prompt}],
         )
         raw = message.content[0].text.strip()
+        print(f"Sonnet raw response ({len(raw)} chars): {raw[:200]}")
         # Extract JSON robustly in case model wraps it
         if raw.startswith("```"):
             import re
-            match = re.search(r'```(?:json)?\s*(.*?)```', raw, re.DOTALL)
-            if match:
-                raw = match.group(1).strip()
+            m = re.search(r'```(?:json)?\s*(.*?)```', raw, re.DOTALL)
+            if m:
+                raw = m.group(1).strip()
         elif not raw.startswith("{"):
             import re
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            if match:
-                raw = match.group(0)
+            m = re.search(r'\{.*\}', raw, re.DOTALL)
+            if m:
+                raw = m.group(0)
         result = json.loads(raw.strip())
         print(f"Matched known issues to Jira: {result}")
         return result
