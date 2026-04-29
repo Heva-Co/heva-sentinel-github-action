@@ -825,6 +825,9 @@ def build_jira_section(match_result: dict) -> str:
 
 
 def main():
+    print("Heva Code Sentinel has been sunsetted. No review will be posted.")
+    return
+
     missing = [k for k in ["ANTHROPIC_API_KEY", "GOOGLE_CHAT_WEBHOOK"] if not os.environ.get(k)]
     if missing:
         raise SystemExit(f"Missing required secrets: {', '.join(missing)}")
